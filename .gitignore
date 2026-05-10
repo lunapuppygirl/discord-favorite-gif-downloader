@@ -1,0 +1,8 @@
+.venv/
+.idea/
+
+downloads/
+logs/
+
+# prevent commiting updated data file
+data.json
