@@ -22,6 +22,9 @@ import mimetypes
 import html
 import time
 import random
+import hashlib
+
+from dev import normalize_bytes
 
 # Configure logging
 logging.basicConfig(
@@ -482,6 +485,7 @@ class GifDownloader:
         self.progress = {"done": 0, "total": 0}
         self.url_cache = {}
         self.last_status_length = 0
+        self.downloaded = {}
         
     def clear_line(self):
         """Clear the current line in terminal"""
@@ -671,6 +675,16 @@ class GifDownloader:
             ]
 
         return resolved_urls
+
+    def normalize_bytes(self, data: bytes) -> bytes:
+        return data.replace(b'\r\n', b'\n').strip()
+
+    def file_hash(self, path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            data = normalize_bytes(f.read())
+            h.update(data)
+        return h.hexdigest()
     
     async def download_file(self, url: str, index: int) -> bool:
         """Download a single file"""
@@ -695,7 +709,7 @@ class GifDownloader:
                     
                     # Get file path
                     file_path = self.get_file_path(url, content_type, index)
-                    
+
                     # Check if file already exists
                     if file_path.exists():
                         self.stats.skipped += 1
@@ -752,6 +766,21 @@ class GifDownloader:
                     # Save file
                     file_path.parent.mkdir(parents=True, exist_ok=True)
                     file_path.write_bytes(content)
+
+                    try:
+                        h = self.file_hash(str(file_path))
+                    except:
+                        return False
+
+                    if h in self.downloaded:
+                        self.stats.skipped += 1
+                        self.progress["done"] += 1
+                        self.print_progress("exists")
+
+                        os.remove(file_path)
+                        return True
+                    else:
+                        self.downloaded[h] = str(file_path)
                     
                     # Update stats
                     self.stats.successful += 1
