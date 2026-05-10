@@ -151,6 +151,7 @@ class URLResolver:
 
     def __init__(self, rate_limiter: RateLimiter):
         self.rate_limiter = rate_limiter
+        self.tenor_cache = {}
 
     @staticmethod
     def clean_url(url: str) -> str:
@@ -318,27 +319,40 @@ class URLResolver:
     
     async def resolve_tenor_url(self, client: httpx.AsyncClient, url: str) -> List[str]:
         """Resolve Tenor URL to direct media URL"""
+
+        if url in self.tenor_cache:
+            return self.tenor_cache[url]
+
         try:
             domain = self.extract_domain(url)
             await self.rate_limiter.wait_for_domain(domain)
             
             try:
-                # For Tenor, we'll try to get the MP4 directly
-                # Tenor URLs often have a pattern like /view/name-gif-ID
-                parsed = urlparse(url)
-                path = parsed.path
-                
-                # Extract ID from path
-                if '/view/' in path:
-                    gif_id = path.split('/view/')[1].split('-')[-1]
-                    if gif_id:
-                        # Try different Tenor CDN URLs
-                        possible_urls = [
-                            f"https://media.tenor.com/{gif_id}.mp4",
-                            f"https://media.tenor.com/{gif_id}.gif",
-                            f"https://c.tenor.com/{gif_id}.gif",
-                        ]
-                        return possible_urls
+                resp = await client.get(url, follow_redirects=True)
+
+                if resp.status_code != 200:
+                    return []
+
+                html_text = resp.text
+
+                patterns = [
+                    r'https://media\.tenor\.com/[^\s\"\']+\.gif',
+                    r'https://media\.tenor\.com/[^\s\"\']+\.mp4',
+                    r'https://c\.tenor\.com/[^\s\"\']+\.gif',
+                    r'https://c\.tenor\.com/[^\s\"\']+\.mp4'
+                ]
+
+                found = []
+
+                # Find patterns in HTML code
+                for pattern in patterns:
+                    matches = re.findall(pattern, html_text)
+
+                    for match in matches:
+                        clean = match.split("?")[0]
+
+                        if clean not in found:
+                            found.append(clean)
                 
                 return []
                     
