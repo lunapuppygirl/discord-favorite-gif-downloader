@@ -47,6 +47,8 @@ MEDIA_TYPES = {
     'video/quicktime': ('.mov', 'mp4'),
 }
 
+DISCORD_TOKEN = ""
+
 # Rate limiting configuration
 RATE_LIMIT_DELAY = 0.1
 MAX_REQUESTS_PER_DOMAIN = 10
@@ -146,38 +148,33 @@ class RateLimiter:
 
 class URLResolver:
     """Resolve special URLs to direct media URLs"""
-    
+
     def __init__(self, rate_limiter: RateLimiter):
         self.rate_limiter = rate_limiter
-    
+
     @staticmethod
     def clean_url(url: str) -> str:
         """Clean and normalize URL"""
         if not url:
             return url
-        
+
         # Decode HTML entities
         url = html.unescape(url)
-        
+
         # Fix URLs that start with slash
         if url.startswith('/') and not url.startswith('//'):
             url = 'https:' + url
-        
-        # Remove tracking parameters
+
+        return url
+
+    @staticmethod
+    def is_discord_attachment(url: str) -> bool:
         parsed = urlparse(url)
-        
-        filtered_params = []
-        for key, values in parse_qs(parsed.query).items():
-            if key in ['ex', 'is', 'hm']:
-                filtered_params.extend([f"{key}={v}" for v in values])
-        
-        new_query = '&'.join(filtered_params) if filtered_params else ''
-        new_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        if new_query:
-            new_url += f"?{new_query}"
-        
-        return new_url
-    
+        return (
+            parsed.netloc in ('cdn.discordapp.com', 'media.discordapp.net')
+            and '/attachments/' in parsed.path
+        )
+
     @staticmethod
     def extract_domain(url: str) -> str:
         """Extract domain from URL"""
@@ -370,6 +367,8 @@ class URLResolver:
             # Route to appropriate resolver
             if 'images-ext-' in domain:
                 return await self.resolve_discord_proxy_url(client, url)
+            elif self.is_discord_attachment(url):
+                return [url]
             elif 'tenor.com' in domain:
                 return await self.resolve_tenor_url(client, url)
             elif 'imgur.com' in domain:
@@ -380,6 +379,40 @@ class URLResolver:
         except Exception as e:
             logger.debug(f"Error in resolve_url for {url}: {e}")
             return [url] if self.is_valid_url(url) else []
+
+
+    async def bulk_refresh_discord_urls(self, client: httpx.AsyncClient, urls: List[str]) -> Dict[str, str]:
+        """Refresh Discord CDN URLs"""
+        if not DISCORD_TOKEN or not urls:
+            return {}
+
+        headers = {"Authorization": DISCORD_TOKEN, "Content-Type": "application/json"}
+        refreshed: Dict[str, str] = {}
+
+        for i in range(0, len(urls), 50):
+            batch = urls[i:i+50]
+            try:
+                # Fetch new URLs
+                # https://docs.discord.food/resources/message#refresh-attachment-urls
+                resp = await client.post(
+                    "https://discord.com/api/v10/attachments/refresh-urls",
+                    headers=headers,
+                    json={"attachment_urls": batch},
+                    timeout=httpx.Timeout(15.0)
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+                # Retrieve new URLs
+                for item in data.get("refreshed_urls", []):
+                    original = item.get("original")
+                    fresh = item.get("refreshed")
+                    if original and fresh:
+                        refreshed[original] = fresh
+            except Exception as e:
+                logger.debug(f"Bulk refresh failed for batch {i}: {e}")
+
+        return refreshed
 
 
 class ProtobufParser:
@@ -612,6 +645,17 @@ class GifDownloader:
                 resolved_urls.append(url)
         
         print(f"\rResolved {self.stats.resolved} URLs")
+
+        discord_urls = [u for u in resolved_urls if URLResolver.is_discord_attachment(u)]
+        if discord_urls and DISCORD_TOKEN:
+            print(f"\nRefreshing {len(discord_urls)} Discord attachment URLs...")
+            refreshed_map = await resolver.bulk_refresh_discord_urls(client, discord_urls)
+            print(f"Refreshed {len(refreshed_map)} URLs")
+            resolved_urls: List[str] = [
+                refreshed_map.get(u) or u
+                for u in resolved_urls
+            ]
+
         return resolved_urls
     
     async def download_file(self, url: str, index: int) -> bool:
@@ -869,7 +913,13 @@ async def main():
     print("Discord Favorite GIF Downloader")
     print("Author: nloginov")
     print("="*50)
-    
+
+    # Get Discord token for refreshing URLs later
+    global DISCORD_TOKEN
+    token_input = input("Enter your Discord token (leave blank to skip): ").strip()
+    if token_input:
+        DISCORD_TOKEN = token_input
+
     # Find input file
     input_files = ['data.json', 'data.txt', 'input.json', 'input.txt']
     input_file = None
