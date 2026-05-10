@@ -24,8 +24,6 @@ import time
 import random
 import hashlib
 
-from dev import normalize_bytes
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -682,7 +680,7 @@ class GifDownloader:
     def file_hash(self, path: str) -> str:
         h = hashlib.sha256()
         with open(path, 'rb') as f:
-            data = normalize_bytes(f.read())
+            data = self.normalize_bytes(f.read())
             h.update(data)
         return h.hexdigest()
     
