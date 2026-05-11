@@ -484,6 +484,7 @@ class GifDownloader:
         self.url_cache = {}
         self.last_status_length = 0
         self.downloaded = {}
+        self.downloaded_lock = asyncio.Lock()
         
     def clear_line(self):
         """Clear the current line in terminal"""
@@ -547,6 +548,19 @@ class GifDownloader:
         if self.client:
             await self.client.aclose()
             self.client = None
+
+    def normalize_discord_url(self, url: str) -> str:
+        # Matches cdn.discordapp.com and media.discordapp.net attachment URLs.
+        # Groups: (host_type, tld, channel_id, attachment_id, filename)
+        # Strips query params (?ex=...&is=...&hm=...) so cdn vs media variants map to the same key.
+        discord_attachment_re = re.compile(
+            r'https://(cdn|media)\.discordapp\.(com|net)/attachments/(\d+)/(\d+)/([^?#]+)')
+
+        m = discord_attachment_re.match(url)
+        if m:
+            _host_type, _tld, channel_id, attachment_id, filename = m.groups()
+            return f"attachments/{channel_id}/{attachment_id}/{filename}"
+        return url
     
     def sanitize_filename(self, filename: str) -> str:
         """Sanitize filename"""
@@ -672,7 +686,20 @@ class GifDownloader:
                 for u in resolved_urls
             ]
 
-        return resolved_urls
+        # Remove duplicate URLs (same file can appear on media.discordapp.net and cdn.discordapp.com)
+        seen_norm: set = set()
+        deduped: List[str] = []
+        for u in resolved_urls:
+            key = self.normalize_discord_url(u)
+            if key not in seen_norm:
+                seen_norm.add(key)
+                deduped.append(u)
+
+        removed = len(resolved_urls) - len(deduped)
+        if removed:
+            print(f"Removed {removed} duplicate Discord attachment URL(s)")
+
+        return deduped
 
     def normalize_bytes(self, data: bytes) -> bytes:
         return data.replace(b'\r\n', b'\n').strip()
@@ -696,6 +723,17 @@ class GifDownloader:
                     self.progress["done"] += 1
                     self.print_progress("invalid")
                     return False
+
+                # Check normalized URL key before downloading
+                norm_key = self.normalize_discord_url(url)
+                async with self.downloaded_lock:
+                    if norm_key in self.downloaded:
+                        self.stats.skipped += 1
+                        self.progress["done"] += 1
+                        self.print_progress("duplicate")
+                        return True
+                    # Reserve the slot so concurrent tasks don't race on the same URL
+                    self.downloaded[norm_key] = "pending"
                 
                 client = await self.get_client()
                 domain = URLResolver.extract_domain(url)
@@ -779,6 +817,10 @@ class GifDownloader:
                         return True
                     else:
                         self.downloaded[h] = str(file_path)
+
+                    async with self.downloaded_lock:
+                        self.downloaded[h] = str(file_path)
+                        self.downloaded[norm_key] = str(file_path)
                     
                     # Update stats
                     self.stats.successful += 1
